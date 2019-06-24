@@ -25,7 +25,7 @@ var (
 func init() {
 	// Initialize the logging component by default
 	logrus.SetLevel(logrus.DebugLevel)
-	SetLoggerDirectory("/tmp")
+	SetLoggerDirectory(".")
 }
 
 // SetLoggerDirectory sets the directory for logrus output.
