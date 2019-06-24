@@ -144,25 +144,31 @@ type WebSocketClient struct {
 	// Error channel
 	errors chan error
 	// Downstream message channel
-	messages        chan *WebSocketDownstreamMessage
-	conn            *websocket.Conn
-	token           *WebSocketTokenModel
-	server          *WebSocketServerModel
-	enableHeartbeat bool
-	skipVerifyTls   bool
+	messages          chan *WebSocketDownstreamMessage
+	conn              *websocket.Conn
+	token             *WebSocketTokenModel
+	server            *WebSocketServerModel
+	enableHeartbeat   bool
+	skipVerifyTls     bool
+	isConnected       bool
+	reconnect         bool
+	reconnectInterval time.Duration
 }
 
 // NewWebSocketClient creates an instance of WebSocketClient.
 func (as *ApiService) NewWebSocketClient(token *WebSocketTokenModel) *WebSocketClient {
 	wc := &WebSocketClient{
-		wg:            &sync.WaitGroup{},
-		done:          make(chan struct{}),
-		errors:        make(chan error, 1),
-		pongs:         make(chan string, 1),
-		acks:          make(chan string, 1),
-		token:         token,
-		messages:      make(chan *WebSocketDownstreamMessage, 2048),
-		skipVerifyTls: as.apiSkipVerifyTls,
+		wg:                &sync.WaitGroup{},
+		done:              make(chan struct{}),
+		errors:            make(chan error, 1),
+		pongs:             make(chan string, 1),
+		acks:              make(chan string, 1),
+		token:             token,
+		messages:          make(chan *WebSocketDownstreamMessage, 2048),
+		skipVerifyTls:     as.apiSkipVerifyTls,
+		isConnected:       false,
+		reconnect:         true,
+		reconnectInterval: time.Second * 2,
 	}
 	return wc
 }
@@ -181,6 +187,7 @@ func (wc *WebSocketClient) Connect() (<-chan *WebSocketDownstreamMessage, <-chan
 	q.Add("connectId", IntToString(time.Now().UnixNano()))
 	q.Add("token", wc.token.Token)
 	u := fmt.Sprintf("%s?%s", s.Endpoint, q.Encode())
+	logrus.Debugf("Connecting to %s", u)
 
 	// Ignore verify tls
 	websocket.DefaultDialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: wc.skipVerifyTls}
@@ -191,22 +198,8 @@ func (wc *WebSocketClient) Connect() (<-chan *WebSocketDownstreamMessage, <-chan
 		return wc.messages, wc.errors, err
 	}
 
-	// Must read the first welcome message
-	for {
-		m := &WebSocketDownstreamMessage{}
-		if err := wc.conn.ReadJSON(m); err != nil {
-			return wc.messages, wc.errors, err
-		}
-		if DebugMode {
-			logrus.Debugf("Received a WebSocket message: %s", ToJsonString(m))
-		}
-		if m.Type == ErrorMessage {
-			return wc.messages, wc.errors, errors.Errorf("Error message: %s", ToJsonString(m))
-		}
-		if m.Type == WelcomeMessage {
-			break
-		}
-	}
+	// Connected
+	wc.isConnected = true
 
 	wc.wg.Add(2)
 	go wc.read()
@@ -217,11 +210,10 @@ func (wc *WebSocketClient) Connect() (<-chan *WebSocketDownstreamMessage, <-chan
 
 func (wc *WebSocketClient) read() {
 	defer func() {
-		close(wc.pongs)
-		close(wc.messages)
 		wc.wg.Done()
 	}()
 
+	logrus.Debug("Starting reader...")
 	for {
 		select {
 		case <-wc.done:
@@ -229,8 +221,14 @@ func (wc *WebSocketClient) read() {
 		default:
 			m := &WebSocketDownstreamMessage{}
 			if err := wc.conn.ReadJSON(m); err != nil {
-				wc.errors <- err
-				return
+				if wc.reconnect {
+					logrus.Warn("Error reading JSON message. Reconnecting...")
+					wc.CloseAndReconnect()
+					return
+				} else {
+					wc.errors <- err
+					return
+				}
 			}
 			if DebugMode {
 				logrus.Debugf("Received a WebSocket message: %s", ToJsonString(m))
@@ -238,6 +236,7 @@ func (wc *WebSocketClient) read() {
 			// log.Printf("ReadJSON: %s", ToJsonString(m))
 			switch m.Type {
 			case WelcomeMessage:
+				wc.messages <- m
 			case PongMessage:
 				if wc.enableHeartbeat {
 					wc.pongs <- m.Id
@@ -344,9 +343,32 @@ func (wc *WebSocketClient) Unsubscribe(channels ...*WebSocketUnsubscribeMessage)
 	return nil
 }
 
+// CloseAndReconnect will try to reconnect.
+func (wc *WebSocketClient) CloseAndReconnect() {
+	wc.Close()
+	go func() {
+		logrus.Infof("Reconnecting in % seconds", wc.reconnectInterval)
+		time.Sleep(wc.reconnectInterval)
+		wc.Connect()
+	}()
+}
+
+// Close closes the underlying network connection without
+// sending or waiting for a close frame.
+func (wc *WebSocketClient) Close() {
+	if wc.conn != nil {
+		wc.conn.Close()
+	}
+	wc.isConnected = false
+	wc.done <- struct{}{}
+	wc.errors <- errors.Errorf("Disconnected")
+}
+
 // Stop stops subscribing the specified channel, all goroutines quit.
 func (wc *WebSocketClient) Stop() {
-	close(wc.done)
 	_ = wc.conn.Close()
+	close(wc.done)
+	close(wc.pongs)
+	close(wc.messages)
 	wc.wg.Wait()
 }
