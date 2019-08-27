@@ -211,6 +211,7 @@ func (wc *WebSocketClient) Connect() (<-chan *WebSocketDownstreamMessage, <-chan
 func (wc *WebSocketClient) read() {
 	defer func() {
 		wc.wg.Done()
+		logrus.Warn("WebSocketClient read() done")
 	}()
 
 	logrus.Debug("Starting reader...")
@@ -356,12 +357,18 @@ func (wc *WebSocketClient) CloseAndReconnect() {
 // Close closes the underlying network connection without
 // sending or waiting for a close frame.
 func (wc *WebSocketClient) Close() {
+	defer func() {
+		logrus.Warnf("WebSocketClient Close() done")
+	}()
+
 	if wc.conn != nil {
 		wc.conn.Close()
 	}
 	wc.isConnected = false
 	wc.done <- struct{}{}
+	logrus.Warnf("WebSocketClient Close() message done sent")
 	wc.errors <- errors.Errorf("Disconnected")
+	logrus.Warnf("WebSocketClient Close() error disconnected sent")
 }
 
 // Stop stops subscribing the specified channel, all goroutines quit.
