@@ -178,6 +178,7 @@ func (wc *WebSocketClient) Connect() (<-chan *WebSocketDownstreamMessage, <-chan
 	// Find out a server
 	s, err := wc.token.Servers.RandomServer()
 	if err != nil {
+		logrus.Warnf("Error getting server: %v", err)
 		return wc.messages, wc.errors, err
 	}
 	wc.server = s
@@ -195,6 +196,7 @@ func (wc *WebSocketClient) Connect() (<-chan *WebSocketDownstreamMessage, <-chan
 	// Connect ws server
 	wc.conn, _, err = websocket.DefaultDialer.Dial(u, nil)
 	if err != nil {
+		logrus.Warnf("Error connecting websocket: %v", err)
 		return wc.messages, wc.errors, err
 	}
 
@@ -348,9 +350,15 @@ func (wc *WebSocketClient) Unsubscribe(channels ...*WebSocketUnsubscribeMessage)
 func (wc *WebSocketClient) CloseAndReconnect() {
 	wc.Close()
 	go func() {
-		logrus.Infof("Reconnecting in % seconds", wc.reconnectInterval)
-		time.Sleep(wc.reconnectInterval)
-		wc.Connect()
+		for {
+			logrus.Infof("Reconnecting in %v seconds", wc.reconnectInterval)
+			time.Sleep(wc.reconnectInterval)
+			logrus.Infof("Connecting...", wc.reconnectInterval)
+			_, _, err := wc.Connect()
+			if err == nil {
+				break
+			}
+		}
 	}()
 }
 
