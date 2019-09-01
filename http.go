@@ -141,7 +141,7 @@ func (br *BasicRequester) Request(request *Request, timeout time.Duration) (*Res
 		return nil, err
 	}
 	// Prevent re-use of TCP connections
-	// req.Close = true
+	req.Close = true
 
 	rid := time.Now().UnixNano()
 
